@@ -11,7 +11,8 @@ import numpy as np
 import cv2
 import mediapipe as mp
 import sounddevice as sd
-from scipy.signal import welch
+from scipy.signal import welch, resample_poly
+from math import gcd
 from sklearn.ensemble import RandomForestClassifier
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -76,8 +77,187 @@ class MemoryManager:
         return summary
 
 # ==========================================
-# 2. OFFLINE NEURAL TEXT-TO-SPEECH (Edge-TTS)
+# 2. NEURAL TEXT-TO-SPEECH & RESPONSE SANITIZATION
 # ==========================================
+import re
+
+def sanitize_for_tts(raw_text: str) -> str:
+    """
+    Extracts only natural spoken conversational discourse from an LLM response.
+    Preserves:
+      - Natural conversational dialogue, questions, and spoken punctuation.
+      - Genuine conversational asides in parentheses (e.g. 'college (and life in general) feels tough').
+      - Numbers, mathematical expressions, and legitimate bracketed conversational text.
+    Removes:
+      - Structured JSON envelopes if present.
+      - Speaker prefixes like 'KAI:', 'Kai:', 'Counselor:', 'AI:'.
+      - Metadata tags like [Kai: Empathetic], [KAI: Calm], [Emotion: ...], [Affect: ...],
+        [EEG: Calm], [Face: Neutral / Focused], [Telemetry: ...].
+      - Standalone bracketed emotion tags like [Empathetic], [Deep Empathy], [Calm].
+      - Parenthetical stage directions and delivery instructions (e.g. '(Matching tone & vocabulary tier)').
+      - Physical action cues and asterisks (e.g. '*softly*', '*pauses*', '*gentle nod*').
+      - Markdown formatting, decorative separators, bullet markers.
+      - Decorative quotation marks wrapping the response.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return ""
+
+    text = raw_text.strip()
+    if not text:
+        return ""
+
+    # 1. Parse structured JSON if returned by LLM
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            data = json.loads(text)
+            for key in ["spoken_response", "response", "spoken", "message", "text"]:
+                if key in data and isinstance(data[key], str):
+                    text = data[key]
+                    break
+        except Exception:
+            pass
+
+    # 2. Remove speaker prefixes at line/string start: 'KAI: ...', 'Kai: ...'
+    text = re.sub(r'(?i)^\s*(?:KAI|Kai|Counselor|AI|Assistant|Psychologist|Personnel|User)\s*:\s*', '', text)
+
+    # 3. Remove metadata / observation headers like [Kai: ...], [Emotion: ...], [Affect: ...], [EEG: ...], [Face: ...]
+    meta_bracket_pattern = (
+        r'(?i)\[\s*(?:Kai|KAI|Counselor|AI|Assistant|Psychologist|'
+        r'Emotion|Affect|Tone|Mood|EEG|Face|Telemetry|State|'
+        r'Internal|Observation|Diagnostic|Sensor|Note|Action|Persona)\s*:[^\]]*\]'
+    )
+    text = re.sub(meta_bracket_pattern, ' ', text)
+
+    # 4. Remove standalone bracketed emotion descriptors like [Empathetic], [Deep Empathy], [Warm & Attentive], [Calm]
+    standalone_emo_pattern = (
+        r'(?i)\[\s*(?:Empathetic|Calm|Compassionate|Grounded|Warm|Neutral|Fatigued|Tense|'
+        r'Smiling|Agitated|Relaxed|Thoughtful|Attentive|Gentle|Deep\s+Empathy|'
+        r'Warm\s*&\s*Attentive|Empathetic\s*/\s*Grounded)\s*\]'
+    )
+    text = re.sub(standalone_emo_pattern, ' ', text)
+
+    # 5. Remove unbracketed metadata lines like "Emotion: Empathetic\n"
+    text = re.sub(
+        r'(?i)^\s*(?:Emotion|Affect|Tone|Mood|EEG|Face|Telemetry|State)\s*:[a-zA-Z0-9_\s/&-]+(?:\n|$)',
+        ' ',
+        text,
+        flags=re.MULTILINE
+    )
+
+    # 6. Handle markdown bold/italic before action tags
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+
+    # Remove single-asterisk/underscore action markers like *softly*, *pauses*, *smiles warmly*
+    text = re.sub(r'\*[^*]+\*', ' ', text)
+    text = re.sub(r'_[^_]+_', ' ', text)
+
+    # 7. Handle parenthetical stage directions and delivery instructions
+    stage_direction_stems = (
+        'tone', 'voice', 'match', 'register', 'tier', 'inflect',
+        'soft', 'gentl', 'warm', 'firm', 'quiet', 'pause', 'paus',
+        'sigh', 'whisper', 'breath', 'smile', 'smil', 'nod',
+        'look', 'lean', 'empath', 'compassion', 'comfort',
+        'calm', 'tens', 'relax', 'fatigue', 'agitat', 'crying',
+        'sob', 'chuckle', 'pacing', 'action', 'stage', 'direction',
+        'gesture', 'delivery', 'facial', 'express', 'neutral', 'focus',
+        'eeg', 'telemetry', 'internal', 'observ'
+    )
+
+    def clean_parenthetical(match):
+        inner = match.group(1).strip()
+        if not inner:
+            return ''
+        inner_lower = inner.lower()
+
+        # Check if any word or token matches stage direction stems
+        words = re.findall(r'[a-z]+', inner_lower)
+        if any(any(w.startswith(stem) for stem in stage_direction_stems) for w in words):
+            return ' '
+
+        # Check for participle starters: '(taking a breath)', '(speaking softly)'
+        if words and (words[0].endswith('ing') or words[0] in ['matches', 'speaks', 'takes', 'looks', 'leans']):
+            return ' '
+
+        # Genuine conversational aside: retain words for natural spoken flow
+        return f' {inner} '
+
+    text = re.sub(r'\(([^)]*)\)', clean_parenthetical, text)
+    text = re.sub(r'\[([^\]]*)\]', clean_parenthetical, text)
+
+    # 8. Remove remaining markdown syntax (headings, backticks, bullet markers)
+    text = re.sub(r'[*#_`>~]', ' ', text)
+    text = re.sub(r'^\s*[-*+]\s+', ' ', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+\.\s+', ' ', text, flags=re.MULTILINE)
+
+    # 9. Strip surrounding quotes wrapping dialogue
+    text = text.replace('"', ' ').replace("'", "'")
+
+    # 10. Clean up extra punctuation, commas, and excessive whitespace
+    text = re.sub(r'\s*,\s*', ', ', text)
+    text = re.sub(r',\s*,+', ', ', text)
+    text = re.sub(r',\s*([?.!])', r'\1', text)
+    text = re.sub(r'\s+\.', '.', text)
+    text = re.sub(r'\.\s*\.+', '.', text)
+    text = re.sub(r'\s+\?', '?', text)
+    text = re.sub(r'\s+!', '!', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # Clean leading/trailing punctuation
+    text = re.sub(r'^[,;:\s]+', '', text)
+    text = re.sub(r'[,;:\s]+$', '.', text)
+
+    # If only punctuation remains, return empty string
+    if not re.search(r'[a-zA-Z0-9]', text):
+        return ""
+
+    return text.strip()
+
+
+def parse_llm_response(raw_text: str) -> tuple:
+    """
+    Parses LLM output into:
+      1. displayed_text: Full response preserved for UI display with emotion tags.
+      2. spoken_text: Cleaned natural discourse passed strictly to TTS.
+      3. emotion_tag: Extracted emotion/affect label if present.
+    """
+    if not raw_text:
+        return "", "", ""
+
+    raw_stripped = raw_text.strip()
+    emotion_tag = ""
+
+    # 1. Check for JSON output
+    if raw_stripped.startswith("{") and raw_stripped.endswith("}"):
+        try:
+            data = json.loads(raw_stripped)
+            emotion_tag = data.get("emotion_bubble", data.get("emotion", data.get("affect", "")))
+            spoken_cand = data.get("spoken_response", data.get("response", data.get("spoken", "")))
+            displayed = f"[{emotion_tag}] {spoken_cand}" if emotion_tag else spoken_cand
+            return displayed, sanitize_for_tts(spoken_cand), emotion_tag
+        except Exception:
+            pass
+
+    # 2. Extract emotion tag from [Emotion: ...], [Affect: ...], [Tone: ...], [Kai: ...], [KAI: ...]
+    emo_match = re.search(
+        r'(?i)\[\s*(?:Emotion|Affect|Tone|Mood|Kai|KAI)\s*:\s*([^\]]+)\]',
+        raw_stripped
+    )
+    if emo_match:
+        emotion_tag = emo_match.group(1).strip()
+    else:
+        # Check for standalone emotion tag like [Empathetic / Grounded]
+        standalone_match = re.search(
+            r'(?i)\[\s*(Empathetic|Calm|Compassionate|Grounded|Warm|Neutral|Fatigued|Tense|Smiling|Agitated|Relaxed|Thoughtful|Attentive|Gentle|Deep\s+Empathy|Warm\s*&\s*Attentive|Empathetic\s*/\s*Grounded)\s*\]',
+            raw_stripped
+        )
+        if standalone_match:
+            emotion_tag = standalone_match.group(1).strip()
+
+    spoken = sanitize_for_tts(raw_stripped)
+    return raw_stripped, spoken, emotion_tag
+
+
 def play_audio_file(file_path):
     # Cross-platform audio play without blocking Tkinter
     if os.name == 'nt':
@@ -86,48 +266,124 @@ def play_audio_file(file_path):
         os.system(f'aplay "{file_path}"')
 
 # Initialize pygame mixer once for fast, crash-free MP3 playback
-pygame.mixer.init()
+if not pygame.mixer.get_init():
+    try:
+        pygame.mixer.init()
+    except Exception as e:
+        print(f"[Pygame Init Warning] {e}")
 
 def speak_neural(text: str):
-    print(f"\n[KAI Speaking]: {text}")
+    """Legacy standalone helper with automatic TTS sanitization."""
+    clean_text = sanitize_for_tts(text)
+    if not clean_text:
+        return
+    print(f"\n[KAI Speaking]: {clean_text}")
     try:
         mp3_file = "kai_speech.mp3"
-        
+
         # 1. Generate the speech audio file via Edge-TTS
         async def _run_tts():
-            communicate = edge_tts.Communicate(text, "en-IN-PrabhatNeural")
+            communicate = edge_tts.Communicate(clean_text, "en-IN-PrabhatNeural")
             await communicate.save(mp3_file)
-        
+
         asyncio.run(_run_tts())
 
         # 2. Play cleanly through Pygame (immune to spaces in folder paths)
         pygame.mixer.music.load(mp3_file)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
-            time.sleep(0.1)
-        pygame.mixer.music.unload()
+            time.sleep(0.05)
+        try:
+            pygame.mixer.music.unload()
+        except Exception:
+            pass
 
     except Exception as e:
         print(f"[TTS Fallback to pyttsx3 due to: {e}]")
-        import pyttsx3
-        engine = pyttsx3.init()
-        engine.say(text)
-        engine.runAndWait()
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.say(clean_text)
+            engine.runAndWait()
+        except Exception as pe:
+            print(f"[pyttsx3 Fallback Error] {pe}")
 
 # ==========================================
 # 3. FASTER-WHISPER OFFLINE STT ENGINE
 # ==========================================
+
 class OfflineSpeechRecognizer:
     def __init__(self):
-        print("[Initializing Local Speech-to-Text...]")
-        # Runs on CPU/GPU seamlessly
-        self.model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+        print("[STT] Loading Whisper model...")
+        self.model = WhisperModel(
+            "base",
+            device="cpu",
+            compute_type="int8"
+        )
+        print("[STT] Whisper model loaded successfully.")
 
     def transcribe(self, audio_data, sample_rate=16000):
-        # Audio array must be float32 normalized
-        segments, _ = self.model.transcribe(audio_data, beam_size=1)
-        transcript = " ".join([segment.text for segment in segments]).strip()
-        return transcript
+        try:
+            audio_data = np.asarray(
+                audio_data, dtype=np.float32
+            ).flatten()
+
+            if audio_data.size == 0:
+                print("[STT ERROR] Empty audio buffer.")
+                return ""
+
+            peak = float(np.max(np.abs(audio_data)))
+            rms = float(np.sqrt(np.mean(audio_data ** 2)))
+
+            print(
+                f"[STT] Audio received: {len(audio_data) / sample_rate:.2f}s | "
+                f"Peak: {peak:.5f} | RMS: {rms:.5f} | "
+                f"Rate: {sample_rate} Hz"
+            )
+
+            if peak < 0.003:
+                print("[STT ERROR] Audio is almost silent.")
+                return ""
+
+            # Whisper requires 16 kHz audio.
+            if sample_rate != 16000:
+                divisor = gcd(int(sample_rate), 16000)
+
+                audio_data = resample_poly(
+                    audio_data,
+                    16000 // divisor,
+                    int(sample_rate) // divisor
+                ).astype(np.float32)
+
+                print("[STT] Audio resampled to 16000 Hz.")
+
+            segments, info = self.model.transcribe(
+                audio_data,
+                language="en",
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                log_prob_threshold=-1.0,
+                compression_ratio_threshold=2.4
+            )
+
+            transcript = " ".join(
+                segment.text.strip() for segment in segments
+            ).strip()
+
+            print(f"[STT] Recognized text: {transcript!r}")
+
+            if not transcript:
+                print("[STT] No words recognized.")
+
+            return transcript
+
+        except Exception as e:
+            print(f"[STT ERROR] {type(e).__name__}: {e}")
+            return ""
+
 
 # ==========================================
 # 4. ARDUINO EXG WITH CSV DATASET & PERSISTENCE
@@ -226,7 +482,7 @@ class PersistentEXGEngine:
 
 class FullMeshVision:
     def __init__(self):
-        # MediaPipe Tasks replacement for the legacy mp.solutions API
+        # Initialize MediaPipe Tasks.
         model_path = Path(__file__).resolve().parent / "face_landmarker.task"
 
         if not model_path.exists():
@@ -251,12 +507,72 @@ class FullMeshVision:
         )
         self.connections = mp.tasks.vision.FaceLandmarksConnections
 
-        self.cap = cv2.VideoCapture(0)
+        # Open the webcam using DirectShow on Windows.
+        # Try camera 0 first, then camera 1 if necessary.
+        self.cap = None
+                # Initialize webcam using DirectShow with a stable format.
+        self.cap = None
+
+        for camera_index in (0, 1):
+            cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+
+            if not cap.isOpened():
+                cap.release()
+                continue
+
+            # Request a conventional webcam format.
+            cap.set(
+                cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*"MJPG")
+            )
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+
+            # Allow the camera to settle and test multiple frames.
+            valid_frames = 0
+
+            for _ in range(10):
+                ret, test_frame = cap.read()
+
+                if (
+                    ret
+                    and test_frame is not None
+                    and test_frame.size > 0
+                    and test_frame.ndim == 3
+                    and test_frame.shape[2] == 3
+                ):
+                    valid_frames += 1
+
+            if valid_frames >= 5:
+                self.cap = cap
+                print(
+                    f"[CAMERA] Index {camera_index}: "
+                    f"{valid_frames}/10 valid frames."
+                )
+                break
+
+            print(
+                f"[CAMERA WARNING] Index {camera_index} "
+                f"returned only {valid_frames}/10 valid frames."
+            )
+            cap.release()
+
+        if self.cap is None:
+            self.face_mesh.close()
+            raise RuntimeError(
+                "Could not retrieve consistent frames from camera "
+                "0 or 1. Close other camera applications and retry."
+            )
+
+        # Reduce capture latency where supported.
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         self.current_frame = None
         self.tension = 0.0
         self.mood = "Neutral"
 
-        # Original calibration settings preserved
+        # Calibration settings.
         self.calibrated = False
         self.calib_frames = 0
         self.calib_limit = 90
@@ -265,17 +581,20 @@ class FullMeshVision:
         self.base_width = 0.0
 
         self.last_timestamp_ms = 0
+        self._camera_warning_printed = False
 
-        if not self.cap.isOpened():
-            self.face_mesh.close()
-            raise RuntimeError(
-                "Could not open webcam. Check camera permissions."
-            )
-
+    
     @staticmethod
-    def _draw_connections(frame, landmarks, connections, w, h,
-                          color=(150, 150, 150), thickness=1):
-        # Draw connections without relying on legacy drawing utilities.
+    def _draw_connections(
+        frame,
+        landmarks,
+        connections,
+        w,
+        h,
+        color=(150, 150, 150),
+        thickness=1,
+    ):
+        """Draw MediaPipe facial landmark connections onto a frame."""
         for connection in connections:
             start = connection.start
             end = connection.end
@@ -293,18 +612,37 @@ class FullMeshVision:
             )
 
             cv2.line(
-                frame, p1, p2, color, thickness, cv2.LINE_AA
+                frame,
+                p1,
+                p2,
+                color,
+                thickness,
+                cv2.LINE_AA,
             )
 
     def get_processed_frame(self):
+        if self.cap is None or not self.cap.isOpened():
+            if not self._camera_warning_printed:
+                print("[CAMERA ERROR] Camera is not open.")
+                self._camera_warning_printed = True
+            return None, self.tension, "No Video"
+
         ret, frame = self.cap.read()
-        if not ret:
-            return None, 0.0, "No Video"
+
+        if not ret or frame is None:
+            if not self._camera_warning_printed:
+                print(
+                    "[CAMERA WARNING] Camera opened but failed "
+                    "to deliver a frame."
+                )
+                self._camera_warning_printed = True
+            return None, self.tension, "No Video"
+
+        self._camera_warning_printed = False
 
         frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # VIDEO mode requires increasing timestamps.
         timestamp_ms = max(
             int(time.monotonic() * 1000),
             self.last_timestamp_ms + 1,
@@ -322,7 +660,6 @@ class FullMeshVision:
             landmarks = results.face_landmarks[0]
             h, w, _ = frame.shape
 
-            # Draw the full face tessellation mesh.
             self._draw_connections(
                 frame,
                 landmarks,
@@ -332,7 +669,6 @@ class FullMeshVision:
                 thickness=1,
             )
 
-            # Draw facial contours: eyes, lips, eyebrows and outline.
             self._draw_connections(
                 frame,
                 landmarks,
@@ -342,7 +678,7 @@ class FullMeshVision:
                 thickness=2,
             )
 
-            # Original metric calculations preserved.
+            # Facial metrics.
             eye_l = np.array([
                 landmarks[33].x * w,
                 landmarks[33].y * h,
@@ -373,20 +709,23 @@ class FullMeshVision:
             ])
             norm_mouth = np.linalg.norm(mouth_l - mouth_r) / iod
 
-            # Vertical elevation: mouth corners relative to upper lip.
             lip_top_y = landmarks[0].y * h
             mouth_corners_y = (mouth_l[1] + mouth_r[1]) * 0.5
             smile_lift = (lip_top_y - mouth_corners_y) / iod
 
-            # Original dynamic self-calibration engine preserved.
+            # Initial neutral-face calibration.
             if not self.calibrated:
                 self.calib_frames += 1
                 self.base_brow += norm_brow
                 self.base_lift += smile_lift
                 self.base_width += norm_mouth
 
-                progress = int(
-                    (self.calib_frames / self.calib_limit) * 100
+                progress = min(
+                    100,
+                    int(
+                        self.calib_frames
+                        / self.calib_limit * 100
+                    ),
                 )
                 self.mood = f"Calibrating Face ({progress}%)"
                 self.tension = 0.0
@@ -404,7 +743,7 @@ class FullMeshVision:
                     )
 
             else:
-                # Slowly track baseline to absorb posture shifts.
+                # Slowly adapt the baseline to posture changes.
                 self.base_brow = (
                     0.995 * self.base_brow + 0.005 * norm_brow
                 )
@@ -412,7 +751,6 @@ class FullMeshVision:
                     0.995 * self.base_lift + 0.005 * smile_lift
                 )
 
-                # Deviations from your personal baseline.
                 brow_contraction = self.base_brow - norm_brow
                 lip_elevation = smile_lift - self.base_lift
                 lip_expansion = norm_mouth - self.base_width
@@ -459,8 +797,14 @@ class FullMeshVision:
         return frame, self.tension, self.mood
 
     def release(self):
-        self.cap.release()
-        self.face_mesh.close()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        if self.face_mesh is not None:
+            self.face_mesh.close()
+            self.face_mesh = None
+
 
 # ==========================================
 # 6. TKINTER SUITE & INTEGRATED RUNTIME
@@ -477,6 +821,11 @@ class KaiApplication:
         self.stt = OfflineSpeechRecognizer()
 
         self.session_active = False
+        self.speech_stop_event = threading.Event()
+        self.current_speech_id = 0
+        self.speech_lock = threading.Lock()
+        self.is_speaking = False
+
         self.exg.connect()
 
         self._build_ui()
@@ -515,17 +864,53 @@ class KaiApplication:
         session_box.pack(fill=tk.BOTH, expand=True, pady=10)
 
         self.btn_session = ttk.Button(session_box, text="START CONVERSATION SESSION", command=self._toggle_session)
-        self.btn_session.pack(fill=tk.X, pady=5)
+        self.btn_session.pack(fill=tk.X, pady=4)
+
+        self.btn_stop_speech = ttk.Button(
+            session_box,
+            text="🛑 STOP SPEAKING",
+            command=self.stop_speaking,
+            state="disabled"
+        )
+        self.btn_stop_speech.pack(fill=tk.X, pady=3)
 
         # Telemetry Status
         self.status_lbl = ttk.Label(session_box, text="Status: Standby | Ready", font=("Consolas", 10))
         self.status_lbl.pack(anchor=tk.W, pady=2)
 
-        self.transcript_box = tk.Text(session_box, height=14, width=44, font=("Segoe UI", 9))
-        self.transcript_box.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Transcript container with scrollbar and mouse-wheel support
+        transcript_frame = ttk.Frame(session_box)
+        transcript_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        self.transcript_scroll = ttk.Scrollbar(transcript_frame, orient=tk.VERTICAL)
+        self.transcript_box = tk.Text(
+            transcript_frame,
+            height=12,
+            width=44,
+            font=("Segoe UI", 9),
+            wrap=tk.WORD,
+            yscrollcommand=self.transcript_scroll.set,
+            bg="#10141B",
+            fg="#F1F5F9",
+            insertbackground="#38BDF8",
+            padx=8,
+            pady=6,
+        )
+        self.transcript_scroll.config(command=self.transcript_box.yview)
+        self.transcript_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.transcript_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _on_mousewheel(event):
+            self.transcript_box.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.transcript_box.bind("<MouseWheel>", _on_mousewheel)
+
+        self.transcript_box.tag_config("user_msg", foreground="#38BDF8", spacing1=3)
+        self.transcript_box.tag_config("kai_msg", foreground="#E2E8F0", spacing1=3)
+        self.transcript_box.tag_config("meta_msg", foreground="#64748B", font=("Consolas", 8))
 
     def _video_loop(self):
         frame, _, _ = self.vision.get_processed_frame()
+
         if frame is not None:
             # Convert OpenCV frame to PIL image for Tkinter
             img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -546,6 +931,149 @@ class KaiApplication:
         else:
             messagebox.showwarning("Training Error", msg)
 
+    def set_status(self, message):
+        """Thread-safe UI status label updater."""
+        try:
+            self.root.after(0, lambda: self.status_lbl.configure(text=f"Status: {message}"))
+        except Exception:
+            pass
+
+    def append_transcript(self, text, tag="kai_msg"):
+        """Thread-safe transcript box appender with non-intrusive auto-scroll."""
+        try:
+            def _update():
+                yview = self.transcript_box.yview()
+                is_near_bottom = yview[1] >= 0.88
+                self.transcript_box.insert(tk.END, text, tag)
+                if is_near_bottom:
+                    self.transcript_box.see(tk.END)
+            self.root.after(0, _update)
+        except Exception:
+            pass
+
+    def stop_speaking(self):
+        """Immediately interrupts current speech generation and Pygame playback."""
+        with self.speech_lock:
+            self.speech_stop_event.set()
+            self.current_speech_id += 1
+            self.is_speaking = False
+
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.music.stop()
+                try:
+                    pygame.mixer.music.unload()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Audio Stop Error] {e}")
+
+        try:
+            self.root.after(0, lambda: self.btn_stop_speech.configure(state="disabled"))
+            self.set_status("Speech stopped. Listening...")
+        except Exception:
+            pass
+
+    def speak_neural_interruptible(self, text: str) -> bool:
+        """
+        Thread-safe, interruptible neural speech synthesis and playback.
+        Returns True if speech completed, False if interrupted or cancelled.
+        """
+        clean_text = sanitize_for_tts(text)
+        if not clean_text:
+            return False
+
+        with self.speech_lock:
+            self.current_speech_id += 1
+            speech_id = self.current_speech_id
+            self.speech_stop_event.clear()
+            self.is_speaking = True
+
+        try:
+            self.root.after(0, lambda: self.btn_stop_speech.configure(state="normal"))
+            self.set_status("Speaking... (Click 'Stop Speaking' to interrupt)")
+        except Exception:
+            pass
+
+        mp3_file = f"kai_speech_{speech_id % 2}.mp3"
+
+        # Check if cancelled before starting generation
+        if self.speech_stop_event.is_set() or speech_id != self.current_speech_id:
+            self._finish_speech(speech_id)
+            return False
+
+        try:
+            async def _run():
+                comm = edge_tts.Communicate(clean_text, "en-IN-PrabhatNeural")
+                await comm.save(mp3_file)
+            asyncio.run(_run())
+        except Exception as e:
+            print(f"[TTS Generation Error / Fallback] {e}")
+            if self.speech_stop_event.is_set() or speech_id != self.current_speech_id:
+                self._finish_speech(speech_id)
+                return False
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                if not self.speech_stop_event.is_set() and speech_id == self.current_speech_id:
+                    engine.say(clean_text)
+                    engine.runAndWait()
+                self._finish_speech(speech_id)
+                return True
+            except Exception as pe:
+                print(f"[pyttsx3 Fallback Error] {pe}")
+                self._finish_speech(speech_id)
+                return False
+
+        # Check if cancelled during generation
+        if self.speech_stop_event.is_set() or speech_id != self.current_speech_id:
+            print(f"[Speech ID {speech_id} cancelled before playback]")
+            self._finish_speech(speech_id)
+            return False
+
+        # Playback loop with active interruption check
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            pygame.mixer.music.load(mp3_file)
+            pygame.mixer.music.play()
+
+            # Confirm playback genuinely started before polling
+            start_wait = time.time()
+            while not pygame.mixer.music.get_busy() and time.time() - start_wait < 0.35:
+                time.sleep(0.02)
+
+            while pygame.mixer.music.get_busy():
+                if self.speech_stop_event.is_set() or speech_id != self.current_speech_id:
+                    print(f"[Playback interrupted for speech ID {speech_id}]")
+                    pygame.mixer.music.stop()
+                    break
+                time.sleep(0.04)
+
+            try:
+                pygame.mixer.music.unload()
+            except Exception:
+                pass
+
+            # Post-speech acoustic dissipation cooldown
+            time.sleep(0.35)
+        except Exception as e:
+            print(f"[Pygame Playback Error] {e}")
+            self._finish_speech(speech_id)
+            return False
+
+        self._finish_speech(speech_id)
+        return True
+
+    def _finish_speech(self, speech_id: int):
+        with self.speech_lock:
+            if speech_id == self.current_speech_id:
+                self.is_speaking = False
+        try:
+            self.root.after(0, lambda: self.btn_stop_speech.configure(state="disabled"))
+        except Exception:
+            pass
+
     def _toggle_session(self):
         if not self.session_active:
             self.session_active = True
@@ -553,53 +1081,115 @@ class KaiApplication:
             threading.Thread(target=self._session_worker, daemon=True).start()
         else:
             self.session_active = False
+            self.stop_speaking()
             self.btn_session.configure(text="START CONVERSATION SESSION")
-            self.status_lbl.configure(text="Status: Stopped")
+            self.set_status("Stopped")
 
     def _session_worker(self):
+        def set_status(message):
+            try:
+                self.root.after(
+                    0,
+                    lambda msg=message: self.status_lbl.configure(
+                        text=f"Status: {msg}"
+                    )
+                )
+            except Exception:
+                pass
+
         while self.session_active:
-            self.status_lbl.configure(text="Status: Listening for speech...")
+            set_status("Listening for speech...")
+
             audio_buffer = []
-            sample_rate = 16000
+            has_spoken = False
+            silence_start = None
 
-            # Record until speech pauses
-            with sd.InputStream(samplerate=sample_rate, channels=1, blocksize=1024) as stream:
-                silence_start = None
-                has_spoken = False
-                while self.session_active:
-                    chunk, _ = stream.read(1024)
-                    audio_buffer.append(chunk.flatten())
-                    rms = np.sqrt(np.mean(chunk**2))
+            try:
+                # Detect the microphone's supported sample rate
+                device_info = sd.query_devices(kind="input")
+                capture_rate = int(device_info["default_samplerate"])
 
-                    if rms > 0.012:
-                        has_spoken = True
-                        silence_start = None
-                        self.status_lbl.configure(text="Status: Speech detected, listening...")
-                    elif has_spoken:
-                        if silence_start is None:
-                            silence_start = time.time()
-                        elif time.time() - silence_start > 2.5:
-                            break
+                print(f"[Audio] Input device: {device_info['name']}")
+                print(f"[Audio] Capture sample rate: {capture_rate} Hz")
 
-            if not self.session_active or not has_spoken:
+                with sd.InputStream(
+                    samplerate=capture_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=1024
+                ) as stream:
+
+                    wait_start = time.time()
+
+                    while self.session_active:
+                        chunk, overflowed = stream.read(1024)
+                        chunk = chunk.flatten()
+
+                        rms = float(np.sqrt(np.mean(chunk ** 2)))
+
+                        if rms > 0.006:
+                            has_spoken = True
+                            silence_start = None
+                            audio_buffer.append(chunk)
+                            set_status("Speech detected, listening...")
+
+                        elif has_spoken:
+                            # Keep the silence after speech so the final
+                            # words are not cut off.
+                            audio_buffer.append(chunk)
+
+                            if silence_start is None:
+                                silence_start = time.time()
+                            elif time.time() - silence_start >= 1.2:
+                                break
+
+                        else:
+                            # Avoid waiting forever if the mic detects nothing
+                            if time.time() - wait_start >= 15:
+                                print("[Audio] No speech detected for 15 seconds.")
+                                break
+
+                if not self.session_active:
+                    break
+
+                if not has_spoken or not audio_buffer:
+                    set_status("No speech detected; listening again...")
+                    continue
+
+                # Transcribe the recorded audio
+                set_status("Transcribing voice...")
+
+                audio_array = np.concatenate(audio_buffer).astype(np.float32)
+
+                user_transcript = self.stt.transcribe(
+                    audio_array,
+                    sample_rate=capture_rate
+                )
+
+                if not user_transcript:
+                    set_status("No words recognized; listening again...")
+                    continue
+
+            except Exception as e:
+                print(f"[AUDIO ERROR] {type(e).__name__}: {e}")
+                set_status(f"Microphone error: {type(e).__name__}")
+                time.sleep(1)
                 continue
 
-            # Run STT via Whisper
-            self.status_lbl.configure(text="Status: Transcribing voice...")
-            audio_array = np.concatenate(audio_buffer).astype(np.float32)
-            user_transcript = self.stt.transcribe(audio_array)
+                        # Transcript has already been generated above.
+            # Do NOT transcribe the same audio a second time.
 
-            if not user_transcript:
-                continue
+            print(f"[PIPELINE] Transcript sent to AI: {user_transcript!r}")
 
             # Extract biometric states
             eeg_state = self.exg.predict()
             tension, mood = self.vision.tension, self.vision.mood
 
-            # UI Log User
-            self.transcript_box.insert(tk.END, f"\nUser: {user_transcript}\n")
-            self.transcript_box.insert(tk.END, f"[Telemetry: EEG={eeg_state} | Face={mood} (Strain: {tension:.2f})]\n")
-            self.transcript_box.see(tk.END)
+            # UI Log User (Thread-safe)
+            self.append_transcript(
+                f"\nUser: {user_transcript}\n"
+                f"[Telemetry: EEG={eeg_state} | Face={mood} (Strain: {tension:.2f})]\n"
+            )
 
             # Clinical LLM Prompting with Memory Context
             past_context = self.memory.get_recent_context_str()
@@ -630,7 +1220,8 @@ class KaiApplication:
                 "5. STRUCTURAL OUTPUT CONSTRAINTS:\n"
                 "- Output length: Strictly 2 to 4 impactful, natural spoken sentences.\n"
                 "- Tone: Warm, grounded, perceptive, psychologically sharp, and quietly empowering.\n"
-                "- Exit outcome: Every exchange must leave the user feeling emotionally lighter, heard, and clear-headed."
+                "- Exit outcome: Every exchange must leave the user feeling emotionally lighter, heard, and clear-headed.\n"
+                "- Format: You may prefix your response with an emotional delivery note in brackets like [Emotion: Compassionate / Grounded] for UI display. The remaining text must be pure natural conversational speech without speaker labels or spoken stage directions."
             )
 
             # Quietly detect affective incongruence (smiling while hurting inside)
@@ -648,28 +1239,43 @@ class KaiApplication:
                 f"Respond with real empathy, comfort, and emotional warmth:"
             )
 
-            self.status_lbl.configure(text="Status: Formulating psychological response...")
-            res = ollama.chat(
-                model="llama3:8b-instruct-q4_K_M",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                options={
-                    "temperature": 0.7,
-                    "repeat_penalty": 1.25
-                }
-            )
-            ai_reply = res['message']['content']
+            self.set_status("Formulating psychological response...")
 
-            # UI Log AI Response & Save to Memory
-            self.transcript_box.insert(tk.END, f"KAI: {ai_reply}\n")
-            self.transcript_box.see(tk.END)
-            self.memory.log_interaction(user_transcript, ai_reply, eeg_state, mood)
+            try:
+                client = ollama.Client(host="http://127.0.0.1:11434")
 
-            # Speak output
-            self.status_lbl.configure(text="Status: Speaking...")
-            speak_neural(ai_reply)
+                res = client.chat(
+                    model="llama3:8b-instruct-q4_K_M",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    options={
+                        "temperature": 0.7,
+                        "repeat_penalty": 1.25
+                    }
+                )
+
+                ai_reply = res['message']['content']
+
+            except Exception as e:
+                print(f"[OLLAMA ERROR] {type(e).__name__}: {e}")
+                self.set_status("AI connection failed. Check Ollama.")
+                time.sleep(1)
+                continue
+
+            # Separate UI display text from sanitized spoken discourse
+            displayed_reply, spoken_reply, emotion_tag = parse_llm_response(ai_reply)
+
+            # UI Log AI Response (Preserves complete response, emotion tags & annotations)
+            self.append_transcript(f"KAI: {displayed_reply}\n")
+            self.memory.log_interaction(user_transcript, displayed_reply, eeg_state, mood)
+
+            # Speak only sanitized conversational response via interruptible engine
+            if spoken_reply and self.session_active:
+                self.speak_neural_interruptible(spoken_reply)
+            else:
+                self.set_status("Listening for speech...")
 
 if __name__ == "__main__":
     root = tk.Tk()
