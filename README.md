@@ -408,4 +408,3 @@ Distributed under the **MIT License**. See [`LICENSE`](https://opensource.org/li
 <div align="center">
   <sub>Built with ❤️ for accessible, stigma-free, privacy-first mental health biofeedback.</sub>
 </div>
-

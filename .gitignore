@@ -1,0 +1,52 @@
+# ========================================================
+# PROJECT KAI: MASTER .GITIGNORE
+# ========================================================
+
+# 1. Dependency Directories
+node_modules/
+*/node_modules/
+
+# 2. Large Binary Installers (>100MB exceeds GitHub limits)
+*.exe
+*.msi
+arduino-ide_2.3.10_Windows_64bit.exe
+KAI-Counselor-main/arduino-ide_2.3.10_Windows_64bit.exe
+
+# 3. Python Cache & Virtual Environments
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# 4. Audio Synthesis Caches (Generated at runtime by Edge-TTS / Pygame)
+*.mp3
+*.wav
+kai_speech_*.mp3
+kai_speech_web.mp3
+
+# 5. Local Development, Backups & Scratch Files
+scratch/
+Backup/
+Backup*/
+*.bak
+*.tmp
+
+# 6. IDE, System & Environment Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.gemini/
+*.log
+
+# 7. Preserved Core Assets (Must be tracked)
+!KAI-Counselor-main/face_landmarker.task
+!KAI-Counselor-main/eeg_model.pkl
+!KAI-Counselor-main/eeg_training_data.csv
+!frontend/dist/
