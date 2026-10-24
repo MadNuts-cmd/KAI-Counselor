@@ -285,18 +285,18 @@ For optimal prefrontal brain-computer interface signal fidelity:
 
 ## 🕹️ Workspace Modes
 
-KAI features two distinct operational workspaces selectable from the top navigation bar:
+KAI features three distinct operational workspaces selectable from the top navigation bar and hamburger menu:
 
 ```
-┌─────────────────────────────────┬─────────────────────────────────┐
-│     1. Minimal Video Call Mode  │    2. Technical EEG Cockpit     │
-├─────────────────────────────────┼─────────────────────────────────┤
-│ • 80% focus on 3D KAI Energy Orb│ • Multi-column telemetry matrix │
-│ • Floating PiP camera stream    │ • Live 468 MediaPipe video HUD  │
-│ • Collapsible transcript drawer │ • Continuous Theta/Alpha/Beta   │
-│ • Real-time subtitle captioning │ • In-Browser EEG sample trainer │
-│ • Zero visual distractions      │ • Affective Incongruence badge  │
-└─────────────────────────────────┴─────────────────────────────────┘
+┌─────────────────────────────────┬─────────────────────────────────┬─────────────────────────────────┐
+│     1. Video Only Mode          │    2. EEG Workspace Mode        │    3. Instructions Tab          │
+├─────────────────────────────────┼─────────────────────────────────┼─────────────────────────────────┤
+│ • 80% focus on 3D KAI Energy Orb│ • Multi-column telemetry matrix │ • High-res 3-lead BioAmp guide  │
+│ • Floating PiP camera stream    │ • Live 468 MediaPipe video HUD  │ • Fpz + bilateral mastoid setup │
+│ • Collapsible transcript drawer │ • Continuous Theta/Alpha/Beta   │ • Verified pinout (A0, 512Hz)   │
+│ • Real-time subtitle captioning │ • In-Browser EEG sample trainer │ • Software setup & run steps    │
+│ • Zero visual distractions      │ • Affective Incongruence badge  │ • Troubleshooting & safety tips │
+└─────────────────────────────────┴─────────────────────────────────┴─────────────────────────────────┘
 ```
 
 ### Keyboard Shortcuts & Instant Interruption

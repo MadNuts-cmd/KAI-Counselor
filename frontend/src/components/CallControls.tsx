@@ -11,6 +11,7 @@ import {
   VolumeX,
   Brain,
   MessageSquare,
+  BookOpen,
 } from 'lucide-react';
 
 interface CallControlsProps {
@@ -19,7 +20,7 @@ interface CallControlsProps {
   isMicMuted: boolean;
   isCameraActive: boolean;
   isAudioMuted: boolean;
-  viewMode?: 'video' | 'eeg';
+  viewMode?: 'video' | 'eeg' | 'instructions';
   isChatOpen?: boolean;
   onToggleSession: () => void;
   onStopSpeaking: () => void;
@@ -156,12 +157,17 @@ export const CallControls: React.FC<CallControlsProps> = ({
           <button
             onClick={onToggleViewMode}
             className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#141A24] hover:bg-[#1A2230] border border-[#232D3F] text-xs text-slate-300 hover:text-cyan-300 transition"
-            title={`Switch to ${viewMode === 'video' ? 'EEG Mode' : 'Video Mode'}`}
+            title={`Switch to ${viewMode === 'video' ? 'EEG Mode' : viewMode === 'eeg' ? 'Instructions' : 'Video Mode'}`}
           >
             {viewMode === 'video' ? (
               <>
                 <Brain className="w-3.5 h-3.5 text-purple-400" />
                 <span>EEG Mode</span>
+              </>
+            ) : viewMode === 'eeg' ? (
+              <>
+                <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Instructions</span>
               </>
             ) : (
               <>

@@ -7,6 +7,7 @@ import { CameraPanel } from './components/CameraPanel';
 import { BiometricsPanel } from './components/BiometricsPanel';
 import { EEGTrainingPanel } from './components/EEGTrainingPanel';
 import { EmotionPanel } from './components/EmotionPanel';
+import { InstructionsPanel } from './components/InstructionsPanel';
 import { CallControls } from './components/CallControls';
 import { Square, MessageSquare, Activity, Sparkles, Camera } from 'lucide-react';
 
@@ -30,8 +31,8 @@ export default function App() {
     toggleAudio,
   } = useBackend();
 
-  // Primary Workspace Mode: 'video' (Minimal Call, Default) | 'eeg' (Technical Workspace)
-  const [viewMode, setViewMode] = useState<'video' | 'eeg'>('video');
+  // Primary Workspace Mode: 'video' (Minimal Call, Default) | 'eeg' (Technical Workspace) | 'instructions' (Hardware Setup)
+  const [viewMode, setViewMode] = useState<'video' | 'eeg' | 'instructions'>('video');
 
   // Floating PiP camera visibility in Video Mode
   const [isPipVisible, setIsPipVisible] = useState(true);
@@ -107,22 +108,26 @@ export default function App() {
 
       {/* 2. Main Workplace Area */}
       <main className="flex-1 flex overflow-hidden relative">
-        {/* LEFT COLUMN: Dialogue & Historical Transcript (Visible in EEG Mode or Mobile Chat tab) */}
-        {viewMode === 'eeg' && (
-          <section
-            className={`w-72 sm:w-80 shrink-0 h-full transition-all duration-300 z-10 ${
-              mobileTab === 'chat'
-                ? 'absolute inset-0 z-20 flex w-full'
-                : 'hidden md:flex'
-            }`}
-          >
-            <ConversationPanel
-              messages={messages}
-              isStreaming={operationalState === 'thinking'}
-              className="w-full h-full"
-            />
-          </section>
-        )}
+        {viewMode === 'instructions' ? (
+          <InstructionsPanel />
+        ) : (
+          <>
+            {/* LEFT COLUMN: Dialogue & Historical Transcript (Visible in EEG Mode or Mobile Chat tab) */}
+            {viewMode === 'eeg' && (
+              <section
+                className={`w-72 sm:w-80 shrink-0 h-full transition-all duration-300 z-10 ${
+                  mobileTab === 'chat'
+                    ? 'absolute inset-0 z-20 flex w-full'
+                    : 'hidden md:flex'
+                }`}
+              >
+                <ConversationPanel
+                  messages={messages}
+                  isStreaming={operationalState === 'thinking'}
+                  className="w-full h-full"
+                />
+              </section>
+            )}
 
         {/* CENTER COLUMN: Central AI Entity (The Animated 3D Energy Orb) */}
         <section
@@ -276,6 +281,8 @@ export default function App() {
             <EmotionPanel facial={facialTelemetry} eeg={eegTelemetry} />
           </section>
         )}
+          </>
+        )}
       </main>
 
       {/* 3. Mobile Navigation Tab Bar */}
@@ -323,7 +330,9 @@ export default function App() {
         onToggleMic={toggleMic}
         onToggleCamera={toggleCamera}
         onToggleAudio={toggleAudio}
-        onToggleViewMode={() => setViewMode((prev) => (prev === 'video' ? 'eeg' : 'video'))}
+        onToggleViewMode={() =>
+          setViewMode((prev) => (prev === 'video' ? 'eeg' : prev === 'eeg' ? 'instructions' : 'video'))
+        }
         onToggleChat={() => setIsVideoChatOpen((prev) => !prev)}
       />
     </div>

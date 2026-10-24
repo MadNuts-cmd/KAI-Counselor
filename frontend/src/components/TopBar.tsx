@@ -11,6 +11,7 @@ import {
   Video,
   Brain,
   Check,
+  BookOpen,
 } from 'lucide-react';
 import type { BackendStatus, OperationalState } from '../types/events';
 
@@ -18,8 +19,8 @@ interface TopBarProps {
   status: BackendStatus;
   operationalState: OperationalState;
   sessionDuration: number;
-  viewMode: 'video' | 'eeg';
-  onViewModeChange: (mode: 'video' | 'eeg') => void;
+  viewMode: 'video' | 'eeg' | 'instructions';
+  onViewModeChange: (mode: 'video' | 'eeg' | 'instructions') => void;
   onOpenSettings?: () => void;
 }
 
@@ -173,6 +174,36 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </div>
               </button>
 
+              {/* Instructions Mode Option */}
+              <button
+                onClick={() => {
+                  onViewModeChange('instructions');
+                  setMenuOpen(false);
+                }}
+                className={`w-full flex items-start gap-3 p-3 rounded-xl transition text-left mt-1 ${
+                  viewMode === 'instructions'
+                    ? 'bg-emerald-950/60 border border-emerald-500/40 text-emerald-100'
+                    : 'hover:bg-slate-800/60 text-slate-300 hover:text-white'
+                }`}
+              >
+                <div
+                  className={`p-2 rounded-lg mt-0.5 ${
+                    viewMode === 'instructions' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  <BookOpen className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-xs tracking-wide">Instructions</span>
+                    {viewMode === 'instructions' && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-normal">
+                    Hardware guide, 3-lead BioAmp electrode placement diagram & troubleshooting.
+                  </p>
+                </div>
+              </button>
+
               <div className="mt-2 pt-2 border-t border-slate-800/80 px-2 flex items-center justify-between text-[10px] font-mono text-slate-500">
                 <span>Press Esc to close</span>
                 <span className="text-cyan-400">Zero backend reload</span>
@@ -210,7 +241,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             }`}
           >
             <Video className="w-3.5 h-3.5" />
-            <span>Video Call</span>
+            <span>Video Only</span>
           </button>
           <button
             onClick={() => onViewModeChange('eeg')}
@@ -221,7 +252,18 @@ export const TopBar: React.FC<TopBarProps> = ({
             }`}
           >
             <Brain className="w-3.5 h-3.5" />
-            <span>EEG Workspace</span>
+            <span>EEG</span>
+          </button>
+          <button
+            onClick={() => onViewModeChange('instructions')}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+              viewMode === 'instructions'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>Instructions</span>
           </button>
         </div>
       </div>
